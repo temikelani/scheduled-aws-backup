@@ -1,0 +1,384 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Sample template to schedule DynamoDB table backup using Lambda- V0.23
+Parameters:
+  BackupRetention:
+    Type: Number
+    Description: Days keep the backup
+    Default: 30
+
+Resources:
+  ScheduledEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: CloudWatch event to trigger lambda SG function
+      ScheduleExpression: cron(0/5 * * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt "DDBBackup.Arn"
+          Id: DDBTarget
+
+  DDBBackupLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: DDBBackupLambdaRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:CreateBackup
+                Resource:
+                  - !Join
+                    - ""
+                    - - "arn:aws:dynamodb:"
+                      - !Ref "AWS::Region"
+                      - ":"
+                      - !Ref "AWS::AccountId"
+                      - ":"
+                      - table/
+                      - !Ref "dynamoDbTable"
+              - Effect: Allow
+                Action:
+                  - dynamodb:ListBackups
+                  - dynamodb:DeleteBackup
+                Resource:
+                  - !Join
+                    - ""
+                    - - "arn:aws:dynamodb:"
+                      - !Ref "AWS::Region"
+                      - ":"
+                      - !Ref "AWS::AccountId"
+                      - ":"
+                      - table/
+                      - !Ref "dynamoDbTable"
+                      - /backup/*
+
+  DDBBackupLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt "DDBBackup.Arn"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt "ScheduledEvent.Arn"
+
+  DDBBackup:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ddb-backup-${AWS::AccountId}
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt "DDBBackupLambdaRole.Arn"
+      Runtime: python3.6
+      Timeout: 300
+      Environment:
+        Variables:
+          DDBTable: !Ref "dynamoDbTable"
+          BackupRetention: !Ref "BackupRetention"
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          from datetime import date, datetime, timedelta
+          from botocore.exceptions import ClientError
+
+          import json
+          import boto3
+          import time
+          import os
+
+          ddbRegion = os.environ['AWS_DEFAULT_REGION']
+          tableName = os.environ['DDBTable']
+          backupName = 'Scheduled_Backup'
+
+          MIN_BACKUPS = 3 # min no of backups to trigger delete
+          
+          ddb = boto3.client('dynamodb', region_name=ddbRegion)
+          print('Backup started for: ', backupName)
+
+          # for deleting old backup. It will search for old backup and will escape deleting last backup days you mentioned in the backup retention
+          #backupRetentionDays=2
+          backupRetentionDays = int(os.environ['BackupRetention']) # less tha 35
+          retentionThreshold = backupRetentionDays-1
+
+
+          def lambda_handler(event, context):
+            latestBackupCount = create_backup(tableName, backupName)
+            delete_old_backups(tableName, latestBackupCount, backupName)
+              
+          def create_backup(ddbTable, backupName):
+            try:
+            #create backup
+              ddb.create_backup(TableName = ddbTable, BackupName = backupName)
+              print('Backup has been taken successfully for table:', ddbTable)
+              
+              #check recent backup
+              fromDate = datetime.now() - timedelta(days=retentionThreshold)
+              latestDate = datetime.now()
+
+              listBackupsResponse = ddb.list_backups(
+                TableName=ddbTable, 
+                TimeRangeLowerBound=datetime(fromDate.year, fromDate.month, fromDate.day), 
+                TimeRangeUpperBound=datetime(latestDate.year, latestDate.month, latestDate.day)
+              )
+              
+              latestBackupCount=len(listBackupsResponse['BackupSummaries'])
+              print('Total backup count in recent days:',latestBackupCount)
+              return latestBackupCount
+            except  ClientError as e:
+              print(e)
+
+            except ValueError as ve:
+              print('error:',ve)
+            
+            except Exception as ex:
+              print(ex)
+
+
+          def delete_old_backups(ddbTable,latestBackupCount, backupName):
+            try: 
+              # check if there are any backups before backupRetentionDays days go
+              latestDate = datetime.now() - timedelta(days=backupRetentionDays)
+              print(latestDate)
+
+              # TimeRangeLowerBound is the release of Amazon DynamoDB Backup and Restore - Nov 29, 2017
+              backupsBeyondRetention = ddb.list_backups(
+                TableName=ddbTable,
+                TimeRangeLowerBound=datetime(2017, 11, 29),
+                TimeRangeUpperBound=datetime(latestDate.year, latestDate.month, latestDate.day)
+              )
+              
+              #check that you have at least MIN_BACKUPS amount of backups
+              if latestBackupCount >= MIN_BACKUPS:
+                if 'LastEvaluatedBackupArn' in backupsBeyondRetention:
+                  lastEvalBackupArn = backupsBeyondRetention['LastEvaluatedBackupArn']
+                else:
+                  lastEvalBackupArn = ''
+                
+                while (lastEvalBackupArn != ''):
+                  for record in backupsBeyondRetention['BackupSummaries']:
+                    backupArn = record['BackupArn']
+                    ddb.delete_backup(BackupArn=backupArn)
+                    print(backupName, 'has deleted this backup:', backupArn)
+
+                  response = ddb.list_backups(
+                    TableName=ddbTable,
+                    TimeRangeLowerBound=datetime(2017, 11, 23),
+                    TimeRangeUpperBound=datetime(deleteupperDate.year, deleteupperDate.month, deleteupperDate.day),
+                    ExclusiveStartBackupArn=lastEvalBackupArn
+                  )
+
+                  if 'LastEvaluatedBackupArn' in response:
+                    lastEvalBackupArn = response['LastEvaluatedBackupArn']
+                  else:
+                    lastEvalBackupArn = ''
+                    print ('the end')
+              else:
+                print ('Recent backup does not meet the deletion criteria')
+            except  ClientError as e:
+              print(e)
+
+            except ValueError as ve:
+              print('error:',ve)
+            
+            except Exception as ex:
+              print(ex)
+
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ------------------- From Setup.yaml--------------
+  # ----------------------------------------------------------------------
+
+  # - S3 bucket will trigger lambda functions that will load DyanmoDB with csvdata upon upload
+  dataDumpBucket:
+    # DependsOn: csvToDdbLambdaFunction
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub data-dump-${AWS::AccountId}
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt csvToDdbLambdaFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+
+  # - S3 Notification permission to trigger lambda function
+  s3CsvTriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref csvToDdbLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::data-dump-${AWS::AccountId}"
+      SourceAccount: !Ref AWS::AccountId
+
+  # - DyanmoDB Table to hold contents of order_data.csv with BACKUP TAG
+  dynamoDbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ddb-table-${AWS::AccountId}
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: item_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+        - AttributeName: item_id
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      Tags:
+        - Key: backupPlan
+          Value: 12-hrs
+
+  # - Role to allow lambda function populate dynamoDbTable with s3 object data
+  CsvToDdbLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - s3.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/AWSLambdaInvocation-DynamoDB"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      Policies:
+        - PolicyName: policyname
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !GetAtt dynamoDbTable.Arn
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:BatchWriteItem"
+
+  # - Function to populate table
+  csvToDdbLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub csv-ddb-${AWS::AccountId}
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import csv
+          import codecs
+          import sys
+
+          s3 = boto3.resource('s3')
+          dynamodb = boto3.resource('dynamodb')
+
+          bucket = os.environ['bucket']
+          key = os.environ['key']
+          tableName = os.environ['table']
+
+          def lambda_handler(event, context):
+            #get() does not store in memory
+            try:
+                obj = s3.Object(bucket, key).get()['Body']
+            except:
+                print("S3 Object could not be opened. Check environment variable. ")
+            try:
+                table = dynamodb.Table(tableName)
+            except:
+                print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            batch_size = 100
+            batch = []
+
+            #DictReader is a generator; not stored in memory
+            for row in csv.DictReader(codecs.getreader('utf-8')(obj)):
+              if len(batch) >= batch_size:
+                  write_to_dynamo(batch)
+                  batch.clear()
+
+              batch.append(row)
+
+            if batch:
+              write_to_dynamo(batch)
+
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Uploaded to DynamoDB Table')
+            }
+
+          def write_to_dynamo(rows):
+            try:
+              table = dynamodb.Table(tableName)
+            except:
+              print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            try:
+              with table.batch_writer() as batch:
+                  for i in range(len(rows)):
+                    batch.put_item(
+                        Item=rows[i]
+                    )
+            except:
+              print("Error executing batch_writer")
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt CsvToDdbLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Environment:
+        Variables:
+          bucket: !Sub data-dump-${AWS::AccountId}
+          key: "order_data.csv"
+          table: !Ref dynamoDbTable
+
+  # ----------------------------------------------------------------------
+  # ---------------------- Create Neptune --------------------------------
+  # ----------------------------------------------------------------------
+
+  # ----------------------------------------------------------------------
+  # ------------------- Create Elatic/Open Search ------------------------
+  # ----------------------------------------------------------------------
+
+Outputs:
+  dataDumpBucketName:
+    Value: !Ref dataDumpBucket
+  dynamoDbTableName:
+    Value: !Ref dynamoDbTable
+  dynamoDbTableArn:
+    Value: !GetAtt dynamoDbTable.Arn

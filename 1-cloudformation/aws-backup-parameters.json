@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "BackupVaultName",
+    "ParameterValue": "12hrs-BackupVault"
+  },
+  {
+    "ParameterKey": "BackupPlanName",
+    "ParameterValue": "12hrs-BackupPlan"
+  },
+  {
+    "ParameterKey": "BackupSelectionName",
+    "ParameterValue": "12hrs-Tag-BackupSelection"
+  },
+  {
+    "ParameterKey": "BackupPlanTagValue",
+    "ParameterValue": "12hr-backup"
+  },
+  {
+    "ParameterKey": "RuleName",
+    "ParameterValue": "7am7pmRule"
+  },
+  {
+    "ParameterKey": "ScheduleExpression",
+    "ParameterValue": "cron(0 7/12 * * ? *)"
+  },
+  {
+    "ParameterKey": "StartWindowMinutes",
+    "ParameterValue": "60"
+  },
+  {
+    "ParameterKey": "CompletionWindowMinutes",
+    "ParameterValue": "120"
+  },
+  {
+    "ParameterKey": "RecoveryPointTagValue",
+    "ParameterValue": "7/12hr-recovery-point"
+  },
+  {
+    "ParameterKey": "MoveToColdStorageAfterDays",
+    "ParameterValue": "120"
+  },
+  {
+    "ParameterKey": "DeleteAfterDays",
+    "ParameterValue": "210"
+  }
+]

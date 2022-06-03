@@ -1,0 +1,294 @@
+Description: "Backs Up Any resource tagged with the key-value pair backupPlan:12-hrs. This plan will run two backups daily, 7am abd 7pm UTC and retain them for 210 days."
+
+Parameters:
+  BackupVaultName:
+    Type: String
+  BackupPlanName:
+    Type: String
+  BackupSelectionName:
+    Type: String
+  BackupPlanTagValue:
+    Type: String
+  RuleName:
+    Type: String
+  ScheduleExpression:
+    Type: String
+  StartWindowMinutes:
+    Type: Number
+  CompletionWindowMinutes:
+    Type: Number
+  RecoveryPointTagValue:
+    Type: String
+  MoveToColdStorageAfterDays:
+    Type: Number
+  DeleteAfterDays:
+    Type: Number
+
+Resources:
+  KMSKey:
+    Type: AWS::KMS::Key
+    DependsOn: dataDumpBucket
+    Properties:
+      Description: "Encryption key for 12hr-backup Vault"
+      EnableKeyRotation: True
+      Enabled: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              "AWS":
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root",
+                }
+            Action:
+              - kms:*
+            Resource: "*"
+
+  12hrsBackupVault:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Ref BackupVaultName
+      EncryptionKeyArn: !GetAtt KMSKey.Arn
+
+  12hrsBackupPlan:
+    Type: "AWS::Backup::BackupPlan"
+    DependsOn: 12hrsBackupVault
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Ref BackupPlanName
+        BackupPlanRule:
+          - RuleName: !Ref RuleName
+            TargetBackupVault: !Ref BackupVaultName
+            ScheduleExpression: !Ref ScheduleExpression
+            StartWindowMinutes: !Ref StartWindowMinutes
+            CompletionWindowMinutes: !Ref CompletionWindowMinutes
+            RecoveryPointTags:
+              RuleName: !Ref RecoveryPointTagValue
+            Lifecycle:
+              MoveToColdStorageAfterDays: !Ref MoveToColdStorageAfterDays
+              DeleteAfterDays: !Ref DeleteAfterDays
+      BackupPlanTags:
+        BackupType: !Ref BackupPlanTagValue
+
+  BackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "backup.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+
+  12hrsBackupSelection:
+    Type: "AWS::Backup::BackupSelection"
+    Properties:
+      BackupPlanId: !Ref 12hrsBackupPlan
+      BackupSelection:
+        # Resources:
+        #   - !GetAtt dynamoDbTable.Arn
+        SelectionName: !Ref BackupSelectionName
+        IamRoleArn: !GetAtt BackupRole.Arn
+        ListOfTags:
+          - ConditionType: STRINGEQUALS
+            ConditionKey: backupPlan
+            ConditionValue: 12-hrs
+        # Conditions:
+        #   StringEquals:
+        #     - ConditionKey: "aws:ResourceTag/env"
+        #       ConditionValue: prod
+        #   StringNotEquals:
+        #     - ConditionKey: "aws:ResourceTag/env"
+        #       ConditionValue: test
+        #   StringLike:
+        #     - ConditionKey: "aws:ResourceTag/env"
+        #       ConditionValue: prod/*
+        #   StringNotLike:
+        #     - ConditionKey: "aws:ResourceTag/env"
+        #       ConditionValue: test/*
+
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ------------------- From Setup.yaml--------------
+  # ----------------------------------------------------------------------
+
+  # - S3 bucket will trigger lambda functions that will load DyanmoDB with csvdata upon upload
+  dataDumpBucket:
+    # DependsOn: csvToDdbLambdaFunction
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub data-dump-${AWS::AccountId}
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt csvToDdbLambdaFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+
+  # - S3 Notification permission to trigger lambda function
+  s3CsvTriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref csvToDdbLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::data-dump-${AWS::AccountId}"
+      SourceAccount: !Ref AWS::AccountId
+
+  # - DyanmoDB Table to hold contents of order_data.csv with BACKUP TAG
+  dynamoDbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ddb-table-${AWS::AccountId}
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: item_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+        - AttributeName: item_id
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      Tags:
+        - Key: backupPlan
+          Value: 12-hrs
+
+  # - Role to allow lambda function populate dynamoDbTable with s3 object data
+  CsvToDdbLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - s3.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/AWSLambdaInvocation-DynamoDB"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      Policies:
+        - PolicyName: policyname
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !GetAtt dynamoDbTable.Arn
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:BatchWriteItem"
+
+  # - Function to populate table
+  csvToDdbLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub csv-ddb-${AWS::AccountId}
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import csv
+          import codecs
+          import sys
+
+          s3 = boto3.resource('s3')
+          dynamodb = boto3.resource('dynamodb')
+
+          bucket = os.environ['bucket']
+          key = os.environ['key']
+          tableName = os.environ['table']
+
+          def lambda_handler(event, context):
+            #get() does not store in memory
+            try:
+                obj = s3.Object(bucket, key).get()['Body']
+            except:
+                print("S3 Object could not be opened. Check environment variable. ")
+            try:
+                table = dynamodb.Table(tableName)
+            except:
+                print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            batch_size = 100
+            batch = []
+
+            #DictReader is a generator; not stored in memory
+            for row in csv.DictReader(codecs.getreader('utf-8')(obj)):
+              if len(batch) >= batch_size:
+                  write_to_dynamo(batch)
+                  batch.clear()
+
+              batch.append(row)
+
+            if batch:
+              write_to_dynamo(batch)
+
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Uploaded to DynamoDB Table')
+            }
+
+          def write_to_dynamo(rows):
+            try:
+              table = dynamodb.Table(tableName)
+            except:
+              print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            try:
+              with table.batch_writer() as batch:
+                  for i in range(len(rows)):
+                    batch.put_item(
+                        Item=rows[i]
+                    )
+            except:
+              print("Error executing batch_writer")
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt CsvToDdbLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Environment:
+        Variables:
+          bucket: !Sub data-dump-${AWS::AccountId}
+          key: "order_data.csv"
+          table: !Ref dynamoDbTable
+
+Outputs:
+  dataDumpBucketName:
+    Value: !Ref dataDumpBucket
+  dynamoDbTableName:
+    Value: !Ref dynamoDbTable
+  dynamoDbTableArn:
+    Value: !GetAtt dynamoDbTable.Arn

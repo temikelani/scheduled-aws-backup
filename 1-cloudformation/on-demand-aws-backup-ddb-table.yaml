@@ -1,0 +1,399 @@
+Description: "AWS Events Rule to Trigger an On demand Backup Job every 5 minutes"
+
+Parameters:
+  BackupVaultName:
+    Type: String
+  StartWindowMinutes:
+    Type: Number
+  CompletionWindowMinutes:
+    Type: Number
+  RecoveryPointTagValue:
+    Type: String
+  MoveToColdStorageAfterDays:
+    Type: Number
+  DeleteAfterDays:
+    Type: Number
+
+Resources:
+  ScheduledEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: CloudWatch event to trigger lambda SG function
+      ScheduleExpression: cron(0/5 * * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt "backupFunction.Arn"
+          Id: OnDemandBackup
+
+  BackupLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt "backupFunction.Arn"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt "ScheduledEvent.Arn"
+
+  KMSKey:
+    Type: AWS::KMS::Key
+    DependsOn: dataDumpBucket
+    Properties:
+      Description: "Encryption key for 12hr-backup Vault"
+      EnableKeyRotation: True
+      Enabled: True
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              "AWS":
+                {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root",
+                }
+            Action:
+              - kms:*
+            Resource: "*"
+
+  BackupVault1:
+    Type: "AWS::Backup::BackupVault"
+    Properties:
+      BackupVaultName: !Ref BackupVaultName
+      EncryptionKeyArn: !GetAtt KMSKey.Arn
+
+  # Permit Aws Backup to create Backup
+  BackupRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "backup.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
+
+  # Role for lambda function to create Backup Job
+  LambdaBackupScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+        - "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
+      Policies:
+        - PolicyName: LambdaAWSBackupPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: "*"
+                Action:
+                  - "backup:CreateBackupVault"
+                  - "backup:DescribeBackupVault"
+                  - "backup:DescribeBackupJob"
+                  - "backup:ListBackupVaults"
+                  - "backup:StartBackupJob"
+                  - "backup:TagResource"
+                  - "backup-storage:*"
+
+              - Effect: Allow
+                Resource: !GetAtt BackupRole.Arn
+                Action:
+                  - "iam:PassRole"
+
+  backupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub on-demand-backup-function-${AWS::AccountId}
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt LambdaBackupScheduleRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Environment:
+        Variables:
+          backupVaultName: !Ref BackupVaultName
+          startWindowMinutes: !Ref StartWindowMinutes
+          completionWindowMinutes: !Ref CompletionWindowMinutes
+          moveToColdStorageAfterDays: !Ref MoveToColdStorageAfterDays
+          deleteAfterDays: !Ref DeleteAfterDays
+          recoveryPointTagValue: !Ref RecoveryPointTagValue
+          kmsKeyARN: !GetAtt KMSKey.Arn
+          backupRoleARN: !GetAtt BackupRole.Arn
+          ddbTableArn: !GetAtt dynamoDbTable.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          from botocore.exceptions import ClientError
+          import os
+
+
+          backupVaultName = os.environ['backupVaultName']
+          startWindowMinutes = int(os.environ['startWindowMinutes'])
+          completionWindowMinutes = int(os.environ['completionWindowMinutes'])
+          moveToColdStorageAfterDays = int(os.environ['moveToColdStorageAfterDays'])
+          deleteAfterDays = int(os.environ['deleteAfterDays'])
+          recoveryPointTagValue = os.environ['recoveryPointTagValue']
+          kmsKeyARN = os.environ['kmsKeyARN']
+          backupRoleARN = os.environ['backupRoleARN']
+          ddbTableArn = os.environ['ddbTableArn']
+
+
+          backupClient = boto3.client('backup')
+
+          def lambda_handler(event, context):
+            if BackupVaultExists() == False:
+              createBackUpVault(backupVaultName, kmsKeyARN)
+            backupDdbTable(backupVaultName, ddbTableArn, backupRoleARN, startWindowMinutes, completionWindowMinutes, moveToColdStorageAfterDays, deleteAfterDays, recoveryPointTagValue)
+            
+          def BackupVaultExists():
+            backupVaultsList = backupClient.list_backup_vaults().get('BackupVaultList')
+            backupVaultNames = [vault.get('BackupVaultName') for vault in backupVaultsList]
+            if backupVaultName in backupVaultNames:
+              return True
+            else:
+              return False
+
+          def createBackUpVault(backupVaultName, kmsKeyARN):
+            response = backupClient.create_backup_vault(
+              BackupVaultName = backupVaultName,
+              EncryptionKeyArn = kmsKeyARN
+            )
+
+          def backupDdbTable(backupVaultName, ddbTableArn, backupRoleARN, startWindowMinutes, completionWindowMinutes, moveToColdStorageAfterDays, deleteAfterDays, recoveryPointTagValue):
+            response = backupClient.start_backup_job(
+              BackupVaultName = backupVaultName,
+              ResourceArn = ddbTableArn,
+              IamRoleArn = backupRoleARN,
+              StartWindowMinutes=startWindowMinutes,
+              CompleteWindowMinutes=completionWindowMinutes,
+              Lifecycle={
+                  'MoveToColdStorageAfterDays': moveToColdStorageAfterDays,
+                  'DeleteAfterDays': deleteAfterDays
+              },
+              RecoveryPointTags={
+                  'ddb-backup': recoveryPointTagValue
+              }
+            )
+            print(response)
+
+          # def backupNeptune(backupVaultName, ddbTableArn, backupRoleARN, startWindowMinutes, completionWindowMinutes, moveToColdStorageAfterDays, deleteAfterDays, recoveryPointTagValue):
+          #   response = backupClient.start_backup_job(
+          #     BackupVaultName = backupVaultName,
+          #     ResourceArn = enter-neptune-arn-here,
+          #     IamRoleArn = backupRoleARN,
+          #     IdempotencyToken='string',
+          #     StartWindowMinutes=startWindowMinutes,
+          #     CompleteWindowMinutes=completionWindowMinutes,
+          #     Lifecycle={
+          #         'MoveToColdStorageAfterDays': moveToColdStorageAfterDays,
+          #         'DeleteAfterDays': deleteAfterDays
+          #     },
+          #     RecoveryPointTags={
+          #         'ddb-backup': recoveryPointTagValue
+          #     }
+          #   )
+
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ----------------------------------------------------------------------
+  # ------------------- From Setup.yaml--------------
+  # ----------------------------------------------------------------------
+
+  # - S3 bucket will trigger lambda functions that will load DyanmoDB with csvdata upon upload
+  dataDumpBucket:
+    # DependsOn: csvToDdbLambdaFunction
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub data-dump-${AWS::AccountId}
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt csvToDdbLambdaFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .csv
+
+  # - S3 Notification permission to trigger lambda function
+  s3CsvTriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: !Ref csvToDdbLambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub "arn:aws:s3:::data-dump-${AWS::AccountId}"
+      SourceAccount: !Ref AWS::AccountId
+
+  # - DyanmoDB Table to hold contents of order_data.csv with BACKUP TAG
+  dynamoDbTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ddb-table-${AWS::AccountId}
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+        - AttributeName: item_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+        - AttributeName: item_id
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      Tags:
+        - Key: backupPlan
+          Value: 12-hrs
+
+  # - Role to allow lambda function populate dynamoDbTable with s3 object data
+  CsvToDdbLambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - s3.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - "arn:aws:iam::aws:policy/AWSLambdaInvocation-DynamoDB"
+        - "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      Policies:
+        - PolicyName: policyname
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Resource: !GetAtt dynamoDbTable.Arn
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:BatchWriteItem"
+
+  # - Function to populate table
+  csvToDdbLambdaFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: !Sub csv-ddb-${AWS::AccountId}
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import csv
+          import codecs
+          import sys
+
+          s3 = boto3.resource('s3')
+          dynamodb = boto3.resource('dynamodb')
+
+          bucket = os.environ['bucket']
+          key = os.environ['key']
+          tableName = os.environ['table']
+
+          def lambda_handler(event, context):
+            #get() does not store in memory
+            try:
+                obj = s3.Object(bucket, key).get()['Body']
+            except:
+                print("S3 Object could not be opened. Check environment variable. ")
+            try:
+                table = dynamodb.Table(tableName)
+            except:
+                print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            batch_size = 100
+            batch = []
+
+            #DictReader is a generator; not stored in memory
+            for row in csv.DictReader(codecs.getreader('utf-8')(obj)):
+              if len(batch) >= batch_size:
+                  write_to_dynamo(batch)
+                  batch.clear()
+
+              batch.append(row)
+
+            if batch:
+              write_to_dynamo(batch)
+
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Uploaded to DynamoDB Table')
+            }
+
+          def write_to_dynamo(rows):
+            try:
+              table = dynamodb.Table(tableName)
+            except:
+              print("Error loading DynamoDB table. Check if table was created correctly and environment variable.")
+
+            try:
+              with table.batch_writer() as batch:
+                  for i in range(len(rows)):
+                    batch.put_item(
+                        Item=rows[i]
+                    )
+            except:
+              print("Error executing batch_writer")
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt CsvToDdbLambdaRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Environment:
+        Variables:
+          bucket: !Sub data-dump-${AWS::AccountId}
+          key: "order_data.csv"
+          table: !Ref dynamoDbTable
+
+  # ----------------------------------------------------------------------
+  # ---------------------- Create Neptune --------------------------------
+  # ----------------------------------------------------------------------
+
+  # ----------------------------------------------------------------------
+  # ------------------- Create Elatic/Open Search ------------------------
+  # ----------------------------------------------------------------------
+
+Outputs:
+  dataDumpBucketName:
+    Value: !Ref dataDumpBucket
+  dynamoDbTableName:
+    Value: !Ref dynamoDbTable
+  dynamoDbTableArn:
+    Value: !GetAtt dynamoDbTable.Arn

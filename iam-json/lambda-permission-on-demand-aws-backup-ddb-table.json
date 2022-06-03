@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "cloudwatch-trigger-lambda",
+      "Principal": ["events.amazonaws.com"],
+      "Action": ["lambda:InvokeFunction"],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "aws:SourceArn": "-enter-even-arn-here"
+        }
+      }
+    }
+  ]
+}

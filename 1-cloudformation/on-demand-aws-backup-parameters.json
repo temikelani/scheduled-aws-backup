@@ -1,0 +1,26 @@
+[
+  {
+    "ParameterKey": "BackupVaultName",
+    "ParameterValue": "test-1"
+  },
+  {
+    "ParameterKey": "StartWindowMinutes",
+    "ParameterValue": "60"
+  },
+  {
+    "ParameterKey": "CompletionWindowMinutes",
+    "ParameterValue": "120"
+  },
+  {
+    "ParameterKey": "MoveToColdStorageAfterDays",
+    "ParameterValue": "120"
+  },
+  {
+    "ParameterKey": "DeleteAfterDays",
+    "ParameterValue": "210"
+  },
+  {
+    "ParameterKey": "RecoveryPointTagValue",
+    "ParameterValue": "on-demand-bakcup"
+  }
+]
