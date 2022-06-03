@@ -11,7 +11,8 @@ ddbRegion = os.environ['AWS_DEFAULT_REGION']
 tableName = os.environ['DDBTable']
 backupName = 'Scheduled_Backup'
 
-MIN_BACKUPS = 3 # min no of backups to trigger deleteddb = boto3.client('dynamodb', region_name=ddbRegion)
+MIN_BACKUPS = 3 # min no of backups to trigger delete
+ddb = boto3.client('dynamodb', region_name=ddbRegion)
 print('Backup started for: ', backupName)
 
 # for deleting old backup. It will search for old backup and will escape deleting last backup days you mentioned in the backup retention
@@ -44,20 +45,18 @@ def create_backup(ddbTable, backupName):
     print('Total backup count in recent days:',latestBackupCount)
     return latestBackupCount
   except  ClientError as e:
-		print(e)
-
-	except ValueError as ve:
-		print('error:',ve)
-	
-	except Exception as ex:
-		print(ex)
+    print(e)
+  except ValueError as ve:
+    print('error:',ve)
+  except Exception as ex:
+    print(ex)
 
 
 def delete_old_backups(ddbTable,latestBackupCount, backupName):
   try: 
     # check if there are any backups before backupRetentionDays days go
-		latestDate = datetime.now() - timedelta(days=backupRetentionDays)
-		print(latestDate)
+    latestDate = datetime.now() - timedelta(days=backupRetentionDays)
+    print(latestDate)
 
 		# TimeRangeLowerBound is the release of Amazon DynamoDB Backup and Restore - Nov 29, 2017
 		backupsBeyondRetention = ddb.list_backups(
