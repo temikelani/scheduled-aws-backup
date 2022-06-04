@@ -5,14 +5,22 @@
 
 ## Summary
 
-This repo considers multiple approaches to automating backups; using AWS Backup to target resources using tags and using cloudwatch Events to trigger a lambda function that creates a backup
+This repo considers multiple approaches to automating backups.
+
+- Using AWS Backup to target resources using tags
+- Using Cloudwatch Rule Events to trigger a lambda function that creates an aws backup-scheduled backup
+- Using Cloudwatch Rule Events to trigger a lambda function that creates an aws backup on-demand backup
+- Using Cloudwatch Rule Events to trigger a lambda function that creates an dynaodb on-demand backup
 
 <br>
 <br>
 
 ## Tech Stack
+
 - AWS CLoudFormation
 - AWS Backup
+- AWS CLI
+- Amazon EeventBridge
 - AWS Lambda
 - AWS DynamoDB
 - AWS Neptune
@@ -50,6 +58,7 @@ This repo considers multiple approaches to automating backups; using AWS Backup 
 # Objective <a id='obj'></a> ([go to top](#top))
 
 ## Scenario
+
 Using AWS Backup, schedule the backups of resources tagged with the `Key:backupPlan` and `Value:12-hr` with aws backup. Backups should run at 7am and 7pm daily.
 
 Using Lamda, Schedule the backup of a DynamoDB Table. Backups should run at 7am and 7pm daily.
@@ -61,30 +70,40 @@ Using Lamda, Schedule the backup of a DynamoDB Table. Backups should run at 7am 
 # Steps <a id='steps'></a> ([go to top](#top))
 
 ## Setup Environment
+
 - [ ] Enter `AWS ACCOUNT ID` in [set-env-variable.sh](./scripts/set-env-variables.sh)
 - [ ] Enter `STACK NAME` in [set-env-variable.sh](./scripts/set-env-variables.sh)
 - [ ] [Opt in to use AWS BackUp](https://docs.aws.amazon.com/aws-backup/latest/devguide/working-with-supported-services.html#working-with-s3#opt-in)
-<br>
-<br>
-<br>
+      <br>
+      <br>
+      <br>
 
 # Via Cloud Formation <a id='0'></a> ([go to top](#top))
 
 <details>
 <summary> Expand For Details </summary>
 
-- run
+- Run the Following Commands
+
   ```
-  export AWS_ACCOUNT_ID="enter account id here"
+  export AWS_ACCOUNT_ID="enter-your-account-id-here"
   export BUCKET_NAME="data-dump-$AWS_ACCOUNT_ID"
   export STACK_NAME="your stack name here"
+
   chmod u+x ./scripts/deploy-setup.sh
   chmod u+x ./scripts/deploy-aws-backup-yaml.sh
   chmod u+x ./scripts/deploy-aws-backup-lambda.sh
+  chmod u+x ./scripts/deploy-on-demand-aws-backup-ddb-table.sh
   chmod u+x ./scripts/deploy-event-schedule-lambda.sh
   ```
 
-## AWS Backup
+## AWS Backup (Scheduled backup via CFN)
+
+- Files used
+
+  - [CFN Template](./1-cloudformation/aws-backup.yaml)
+  - [Param File](./1-cloudformation/aws-backup-parameters.json)
+  - [Bash Script](./scripts/deploy-aws-backup-yaml.sh)
 
 - Deploy the CloudFormation Template [aws-backup.yaml](./1-cloudformation/aws-backup.yaml) by running
   ```
@@ -94,12 +113,25 @@ Using Lamda, Schedule the backup of a DynamoDB Table. Backups should run at 7am 
   ./scripts/deploy-aws-backup-yaml.sh delete-stack
   ```
 
-- Or deploy the CloudFormation Template [aws-backup-lambda.yaml](./1-cloudformation/aws-backup-lambda.yaml) by running
+<br>
+
+## AWS Backup (Scheduled backup via Lambda)
+
+- Files used
+
+  - [CFN Template](./1-cloudformation/aws-backup-lambda.yaml)
+  - [Param File](./1-cloudformation/aws-backup-parameters.json)
+  - [Python](./lambda/aws-backup-lambda.py)
+  - [Bash Script](./scripts/deploy-aws-backup-lambda.sh)
+
+- Deploy the CloudFormation Template [aws-backup-lambda.yaml](./1-cloudformation/aws-backup-lambda.yaml) by running
 
   ```
   ./scripts/deploy-aws-backup-lambda.sh update-stack
   ```
-  - to invoke the function. 
+
+  - to invoke the function.
+
   ```
   export FUNCTION_NAME="aws-backup-plan-$AWS_ACCOUNT_ID"
 
@@ -109,43 +141,63 @@ Using Lamda, Schedule the backup of a DynamoDB Table. Backups should run at 7am 
   --function-name $FUNCTION_NAME \
   $FUNCTION_NAME.json
   ```
+
   - to delete resources
+
   ```
   ./scripts/deploy-aws-backup-lambda.sh delete-stack
   ```
-  - you would have to delete the backup vault, plan and selection manually, and this mehto created them by invoking a lambda function (aka, i was too lazy to do this myself lol)
 
+  - `You may/will have to delete the backup vault, plan and selection manually.`
 
-## AWS Lambda 
+<br>
+
+## AWS Backup (On-demand backup via Events & Lambda)
+
+- Files used
+
+  - [CFN Template](./1-cloudformation/on-demand-aws-backup-ddb-table.yaml)
+  - [Param File](./1-cloudformation/on-demand-aws-backup-parameters.json)
+  - [Python](./lambda/on-demand-aws-backup-ddb-table.py)
+  - [Bash Script](./scripts/deploy-on-demand-aws-backup-ddb-table.sh)
+
+- To use a cloud watch event to trigger manual aws backups of a ddbtable, run
+
+  ```
+  ./scripts/deploy-on-demand-aws-backup-ddb-table.sh update-stack
+  ```
+
+  - to delete resources
+
+  ```
+  ./scripts/deploy-on-demand-aws-backup-ddb-table.sh delete-stack
+  ```
+
+- `Note that you will have to delete resources created by lambda manually`
+
+<br>
+
+## Dynamo DB Backup via Lambda & CloudWatch Event (Scheduled backup via Lambda)
+
+- Files used
+
+  - [CFN Template](./1-cloudformation/event-schedule-lambda-backup.yaml)
+  - [Python](./lambda/ddb-backup.py)
+  - [Bash Script](./scripts/deploy-event-schedule-lambda.sh)
 
 - Deploy the CloudFormation Template [event-schedule-lambda-backup.yaml](1-cloudformation/event-schedule-lambda-backup.yaml) by running
 
   ```
   ./scripts/deploy-event-schedule-lambda.sh update-stack
   ```
+
   - to delete resources
+
   ```
   ./scripts/deploy-event-schedule-lambda.sh delete-stack
   ```
-- `You may/will have to delete backups created by lambd fx manually`
 
-## Trigger On Demand Backups
-
-- Files used
-  - [CFN Template](./1-cloudformation/on-demand-aws-backup-ddb-table.yaml)
-  - [Param File](./1-cloudformation/on-demand-aws-backup-parameters.json)
-  - [Python](./lambda/on-demand-aws-backup-ddb-table.py)
-  - [bash Script](./scripts/deploy-on-demand-aws-backup-ddb-table.sh)
-
-- To use a cloud watch event to trigger manual aws backups of a ddbtable, run
-  ```
-  ./scripts/deploy-on-demand-aws-backup-ddb-table.sh update-stack 
-  ```
-  - to delete resources
-  ```
-  ./scripts/deploy-on-demand-aws-backup-ddb-table.sh delete-stack 
-  ```
-- `Note that you will have to delete backups and backup vaults manually`
+- `You may/will have to delete resoruce created by lambda manually`
 
 </details>
 
@@ -224,8 +276,3 @@ Using Lamda, Schedule the backup of a DynamoDB Table. Backups should run at 7am 
 <br>
 <br>
 <br>
-
-
-
-BackupJobId': 'B45CFFE0-84DD-3D20-D928-BEE85E7B0F21', 'RecoveryPointArn': 'arn:aws:backup:us-east-1:526329662628:recovery-point:f742bcc1-c89a-4dad-bac6-b5489542604b', 
-BackupJobId': 'B45CFFE0-84DD-3D20-D928-BEE85E7B0F21', 'RecoveryPointArn': 'arn:aws:backup:us-east-1:526329662628:recovery-point:f742bcc1-c89a-4dad-bac6-b5489542604b', 'CreationDate': dateti

@@ -56,7 +56,6 @@ def backupDdbTable(backupVaultName, ddbTableArn, backupRoleARN, startWindowMinut
 #     BackupVaultName = backupVaultName,
 #     ResourceArn = enter-neptune-arn-here,
 #     IamRoleArn = backupRoleARN,
-#     IdempotencyToken='string',
 #     StartWindowMinutes=startWindowMinutes,
 #     CompleteWindowMinutes=completionWindowMinutes,
 #     Lifecycle={
@@ -66,7 +65,7 @@ def backupDdbTable(backupVaultName, ddbTableArn, backupRoleARN, startWindowMinut
 #     RecoveryPointTags={
 #         'ddb-backup': recoveryPointTagValue
 #     }
-# )
+#   )
 
 
 lambda_handler('event', 'context')
